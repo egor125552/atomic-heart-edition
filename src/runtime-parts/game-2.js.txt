@@ -125,7 +125,7 @@ function scanSignal() {
   if (state.scanner <= 0) return showSignalChoices('Сканер разряжен. Используй ручную проверку — она медленнее, но всегда доступна.');
   state.scanner -= 1;
   currentSignal.scanned = true;
-  consumeTurn(1);
+  if (!consumeTurn(1)) return;
   announce(`Результат сканирования: ${currentSignal.physical}.`);
   showSignalChoices();
 }
