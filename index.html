@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#07090d">
+  <title>Нулевая смена — аудио-хоррор</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip" href="#game">К игре</a>
+  <main id="game" class="shell" aria-labelledby="title">
+    <header>
+      <p class="eyebrow">Аудио-хоррор / тактический рогалик</p>
+      <h1 id="title">Нулевая смена</h1>
+      <p id="subtitle">Станция отвечает твоим голосом. Не каждый сигнал настоящий.</p>
+    </header>
+    <section id="start-screen" class="panel" aria-labelledby="start-title">
+      <h2 id="start-title">Главное меню</h2>
+      <p>Наушники желательны. Всё важное доступно текстом и через скринридер.</p>
+      <div class="actions vertical">
+        <button id="new-game">Новая смена</button>
+        <button id="continue-game" hidden>Продолжить</button>
+        <button id="how-to">Как играть</button>
+      </div>
+      <fieldset>
+        <legend>Доступность</legend>
+        <label><input id="tts-toggle" type="checkbox"> Озвучивать игровые сообщения голосом браузера</label>
+        <label><input id="audio-toggle" type="checkbox" checked> Игровые звуки</label>
+        <label><input id="reduced-motion" type="checkbox"> Минимум анимации</label>
+      </fieldset>
+      <div id="how-panel" class="help" hidden>
+        <h3>Управление</h3>
+        <p>Tab — переход по кнопкам, Enter или пробел — действие. Горячие клавиши: 1–4 — действия, S — сканер, R — статус, M — карта, Escape — пауза.</p>
+        <p>Сначала слушай сигнал. Сканер показывает физические признаки, но тратит заряд. Настоящие сигналы обычно стабильны; имитации копируют голос, но ошибаются в ритме, направлении или контрольной фразе.</p>
+      </div>
+    </section>
+    <section id="game-screen" hidden>
+      <section class="panel status-panel" aria-labelledby="status-title">
+        <h2 id="status-title">Состояние</h2>
+        <div id="status" class="status-grid" role="status"></div>
+      </section>
+      <section class="panel" aria-labelledby="chapter-title">
+        <p id="chapter-label" class="eyebrow"></p>
+        <h2 id="chapter-title"></h2>
+        <p id="objective"></p>
+        <p id="room" class="room"></p>
+      </section>
+      <section class="panel" aria-labelledby="event-title">
+        <h2 id="event-title">Журнал смены</h2>
+        <div id="log" class="log" tabindex="0" aria-live="polite" aria-atomic="true"></div>
+        <div id="choices" class="actions vertical" aria-label="Доступные действия"></div>
+      </section>
+      <section class="panel compact" aria-label="Справочные действия">
+        <div class="actions">
+          <button id="status-button">Статус (R)</button>
+          <button id="map-button">Карта (M)</button>
+          <button id="pause-button">Пауза</button>
+        </div>
+      </section>
+    </section>
+    <section id="pause-screen" class="panel" hidden aria-labelledby="pause-title">
+      <h2 id="pause-title">Пауза</h2>
+      <div class="actions vertical">
+        <button id="resume-button">Продолжить</button>
+        <button id="save-exit-button">Сохранить и выйти</button>
+        <button id="restart-chapter-button">Начать главу заново</button>
+      </div>
+    </section>
+    <section id="ending-screen" class="panel" hidden aria-labelledby="ending-title">
+      <h2 id="ending-title"></h2>
+      <p id="ending-text"></p>
+      <p id="ending-stats"></p>
+      <div class="actions vertical">
+        <button id="epilogue-button">Эпилог</button>
+        <button id="new-run-button">Новая смена+</button>
+      </div>
+    </section>
+  </main>
+  <div id="sr-alert" class="sr-only" role="alert" aria-live="assertive"></div>
+  <script type="module" src="src/game.js"></script>
+</body>
+</html>
