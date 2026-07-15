@@ -1,0 +1,13 @@
+{
+  "name": "zero-shift-audio-game",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "serve": "python3 -m http.server 4173",
+    "test:manual": "node manual-playthrough.mjs && node edge-cases.mjs && node audit.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.61.1"
+  }
+}
