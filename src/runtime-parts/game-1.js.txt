@@ -1,0 +1,298 @@
+const $ = id => document.getElementById(id);
+const screens = {
+  start: $('start-screen'), game: $('game-screen'), pause: $('pause-screen'), ending: $('ending-screen')
+};
+const els = {
+  status: $('status'), chapterLabel: $('chapter-label'), chapterTitle: $('chapter-title'),
+  objective: $('objective'), room: $('room'), log: $('log'), choices: $('choices'), alert: $('sr-alert'),
+  endingTitle: $('ending-title'), endingText: $('ending-text'), endingStats: $('ending-stats')
+};
+
+const SAVE_KEY = 'zero-shift-save-v1';
+const CHECKPOINT_KEY = 'zero-shift-checkpoint-v1';
+const SETTINGS_KEY = 'zero-shift-settings-v1';
+const testMode = new URLSearchParams(location.search).has('test') && ['', 'localhost', '127.0.0.1'].includes(location.hostname);
+let state = null;
+let currentSignal = null;
+let challenge = null;
+let choiceCounter = 0;
+let lastScreen = 'start';
+
+function defaultSettings() {
+  return { tts: false, audio: true, reducedMotion: false };
+}
+let settings = loadJson(SETTINGS_KEY) || defaultSettings();
+
+function loadJson(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+function saveJson(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage may be blocked */ }
+}
+
+function makeState() {
+  return {
+    version: 1,
+    chapterIndex: 0,
+    roomId: CHAPTERS[0].start,
+    turn: 0,
+    health: 100,
+    oxygen: 100,
+    power: 75,
+    pressure: 0,
+    scanner: 4,
+    battery: 2,
+    stun: 1,
+    scrap: 0,
+    fragments: 0,
+    score: 0,
+    correctSignals: 0,
+    wrongSignals: 0,
+    totalSignals: 0,
+    repairs: 0,
+    valves: 0,
+    keys: 0,
+    chapterProgress: { repair: 0, signals: 0, valves: 0, keys: 0 },
+    completedTasks: [],
+    resolvedSignalRooms: [],
+    salvagedRooms: [],
+    usedHealRooms: [],
+    usedRechargeRooms: [],
+    sonarRevealedRoom: null,
+    upgrades: [],
+    mods: { oxygenMove: 3, scannerBonus: 0, batteryBonus: 0, stunBonus: 0, damageReduce: 0, safeRepair: false },
+    threatRoom: null,
+    threatFrozen: 0,
+    manualCrankUsed: false,
+    completed: false,
+    ending: null,
+    run: 1,
+    pendingSignals: {}
+  };
+}
+
+function normalizeLoaded(s) {
+  if (!s || typeof s !== 'object') return null;
+  const base = makeState();
+  const merged = { ...base, ...s, mods: { ...base.mods, ...(s.mods || {}) }, chapterProgress: { ...base.chapterProgress, ...(s.chapterProgress || {}) } };
+  if (!CHAPTERS[merged.chapterIndex] || !CHAPTERS[merged.chapterIndex].rooms[merged.roomId]) return null;
+  if (!merged.pendingSignals || typeof merged.pendingSignals !== 'object') merged.pendingSignals = {};
+  for (const key of ['completedTasks','resolvedSignalRooms','salvagedRooms','usedHealRooms','usedRechargeRooms','upgrades']) {
+    if (!Array.isArray(merged[key])) merged[key] = [];
+  }
+  return merged;
+}
+
+function chapter() { return CHAPTERS[state.chapterIndex]; }
+function room() { return chapter().rooms[state.roomId]; }
+function taskKey(roomId = state.roomId) { return `${chapter().id}:${roomId}`; }
+function signalKey(roomId = state.roomId) { return `${chapter().id}:${roomId}`; }
+function hasTaskDone(roomId = state.roomId) { return state.completedTasks.includes(taskKey(roomId)); }
+function hasSignalDone(roomId = state.roomId) { return state.resolvedSignalRooms.includes(signalKey(roomId)); }
+function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+function randInt(max) { return Math.floor(Math.random() * max); }
+function pick(arr) { return arr[randInt(arr.length)]; }
+
+function applySettings() {
+  $('tts-toggle').checked = settings.tts;
+  $('audio-toggle').checked = settings.audio;
+  $('reduced-motion').checked = settings.reducedMotion;
+  document.documentElement.classList.toggle('reduced-motion', settings.reducedMotion);
+  setAudioEnabled(settings.audio);
+}
+function updateSettings() {
+  settings = {
+    tts: $('tts-toggle').checked,
+    audio: $('audio-toggle').checked,
+    reducedMotion: $('reduced-motion').checked
+  };
+  saveJson(SETTINGS_KEY, settings);
+  applySettings();
+}
+
+function showScreen(name) {
+  Object.entries(screens).forEach(([key, node]) => node.hidden = key !== name);
+  lastScreen = name;
+  const heading = screens[name].querySelector('h2');
+  if (heading) { heading.tabIndex = -1; queueMicrotask(() => heading.focus()); }
+}
+
+function announce(text, danger = false) {
+  els.log.textContent = text;
+  els.log.classList.toggle('danger', danger);
+  els.alert.textContent = '';
+  setTimeout(() => { els.alert.textContent = text; }, 10);
+  speak(text, settings.tts);
+  if (danger) playUi('danger');
+}
+
+function setChoices(items) {
+  els.choices.replaceChildren();
+  choiceCounter = 0;
+  items.forEach(item => {
+    const btn = document.createElement('button');
+    choiceCounter += 1;
+    const n = choiceCounter;
+    btn.textContent = `${n}. ${item.label}`;
+    if (item.disabled) btn.disabled = true;
+    if (item.title) btn.title = item.title;
+    btn.dataset.choice = String(n);
+    btn.addEventListener('click', () => {
+      unlockAudio();
+      playUi('ok');
+      item.action();
+    });
+    els.choices.append(btn);
+  });
+}
+
+function updateHeader() {
+  const c = chapter();
+  els.chapterLabel.textContent = `Глава ${c.number} из ${CHAPTERS.length}`;
+  els.chapterTitle.textContent = c.title;
+  els.objective.textContent = `${c.objective} Прогресс: ${progressText()}`;
+  els.room.textContent = `Текущее помещение: ${room().name}.`;
+}
+
+function progressText() {
+  const req = chapter().required;
+  const labels = { repair: 'ремонт', signals: 'сигналы', valves: 'клапаны', keys: 'ключи' };
+  return Object.entries(req).map(([k,v]) => `${labels[k]} ${state.chapterProgress[k] || 0}/${v}`).join(', ');
+}
+
+function renderStatus() {
+  const stats = [
+    ['Здоровье', `${state.health}%`], ['Кислород', `${state.oxygen}%`], ['Энергия', `${state.power}%`],
+    ['Сканер', state.scanner], ['Батарея', state.battery], ['Импульс', state.stun],
+    ['Фрагменты', state.fragments], ['Очки', state.score]
+  ];
+  if (chapter().mechanics.includes('pressure')) stats.splice(3, 0, ['Давление', `${state.pressure}%`]);
+  els.status.innerHTML = stats.map(([k,v]) => `<div class="stat"><span>${k}</span><strong>${v}</strong></div>`).join('');
+}
+
+function saveCurrent() {
+  if (!state || state.completed) return;
+  saveJson(SAVE_KEY, state);
+  $('continue-game').hidden = false;
+}
+function saveCheckpoint() {
+  saveJson(CHECKPOINT_KEY, state);
+  saveCurrent();
+}
+function clearSave() {
+  localStorage.removeItem(SAVE_KEY);
+  localStorage.removeItem(CHECKPOINT_KEY);
+  $('continue-game').hidden = true;
+}
+
+function newGame() {
+  unlockAudio();
+  clearSave();
+  state = makeState();
+  beginChapter(0, true);
+}
+function continueGame() {
+  const loaded = normalizeLoaded(loadJson(SAVE_KEY));
+  if (!loaded) {
+    clearSave();
+    announceMenu('Сохранение повреждено. Начни новую смену.');
+    return;
+  }
+  state = loaded;
+  showScreen('game');
+  renderAll();
+  if (checkThreatEncounter()) return;
+  enterRoom(false, `Смена восстановлена. ${room().name}.`);
+}
+function restartChapter() {
+  const loaded = normalizeLoaded(loadJson(CHECKPOINT_KEY));
+  if (!loaded) {
+    beginChapter(state.chapterIndex, true);
+    return;
+  }
+  state = loaded;
+  showScreen('game');
+  renderAll();
+  enterRoom(false, `Глава перезапущена. ${chapter().intro}`);
+}
+
+function beginChapter(index, fresh = false) {
+  state.chapterIndex = index;
+  const c = chapter();
+  state.roomId = c.start;
+  state.turn = 0;
+  state.health = fresh && index === 0 ? 100 : clamp(state.health + 30, 45, 100);
+  state.oxygen = 100;
+  state.power = clamp(70 + state.mods.batteryBonus * 5, 0, 100);
+  state.pressure = c.mechanics.includes('pressure') ? 10 : 0;
+  state.scanner = 4 + state.mods.scannerBonus;
+  state.battery = 2 + state.mods.batteryBonus;
+  state.stun = 1 + state.mods.stunBonus;
+  state.chapterProgress = { repair: 0, signals: 0, valves: 0, keys: 0 };
+  state.manualCrankUsed = false;
+  state.sonarRevealedRoom = null;
+  currentSignal = null;
+  challenge = null;
+  if (c.mechanics.includes('stalker')) {
+    const ids = Object.keys(c.rooms).filter(id => id !== c.start && !c.rooms[id].safe);
+    state.threatRoom = ids[ids.length - 1];
+    state.threatFrozen = 1;
+  } else {
+    state.threatRoom = null;
+    state.threatFrozen = 0;
+  }
+  showScreen('game');
+  renderAll();
+  saveCheckpoint();
+  enterRoom(false, c.intro);
+}
+
+function renderAll() {
+  updateHeader();
+  renderStatus();
+}
+
+function roomDescription() {
+  const r = room();
+  const bits = [r.name + '.'];
+  if (r.safe) bits.push('Здесь безопаснее, чем в коридорах.');
+  if (r.hazardous) bits.push('Среда опасна: долго задерживаться нельзя.');
+  if (r.task && !hasTaskDone()) bits.push('Здесь есть незавершённая задача.');
+  if (r.signal && !hasSignalDone()) bits.push('В эфире слышен необработанный сигнал.');
+  if (r.salvage && !state.salvagedRooms.includes(taskKey())) bits.push('Сканер отмечает пригодные детали.');
+  if (r.exit) bits.push(requirementsMet() ? 'Путь дальше открыт.' : `Путь заблокирован. Нужно: ${progressText()}.`);
+  return bits.join(' ');
+}
+
+function enterRoom(cost = true, prefix = '') {
+  currentSignal = null;
+  challenge = null;
+  if (cost) {
+    state.turn += 1;
+    state.oxygen = clamp(state.oxygen - state.mods.oxygenMove, 0, 100);
+    state.power = clamp(state.power - 1, 0, 100);
+    if (room().hazardous) damage(7, 'Опасная среда обжигает лёгкие и кожу.');
+    advanceHazards();
+    if (checkFailure()) return;
+    if (checkThreatEncounter()) return;
+  }
+  renderAll();
+  announce(`${prefix ? prefix + '\n' : ''}${roomDescription()}`);
+  showRoomActions();
+  saveCurrent();
+}
+
+function showRoomActions() {
+  const r = room();
+  const actions = [];
+  if (r.signal && !hasSignalDone()) actions.push({ label: 'Прослушать неизвестный сигнал', action: () => startSignal() });
+  if (r.task && !hasTaskDone()) {
+    const labels = { repair: 'Начать ремонт', valve: 'Закрыть клапан', key: 'Извлечь голосовой ключ' };
+    actions.push({ label: labels[r.task], action: () => startTask(r.task) });
+  }
+  if (r.salvage && !state.salvagedRooms.includes(taskKey())) actions.push({ label: 'Разобрать найденное оборудование', action: salvage });
+  if (r.heal && !state.usedHealRooms.includes(taskKey()) && state.health < 100) actions.push({ label: 'Использовать медицинский модуль', action: heal });
+  if (r.recharge && !state.usedRechargeRooms.includes(taskKey())) actions.push({ label: 'Подзарядить инструменты', action: recharge });
