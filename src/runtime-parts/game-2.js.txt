@@ -1,0 +1,253 @@
+  if (chapter().mechanics.includes('darkness')) actions.push({ label: `Импульс сонара (${state.battery})`, action: sonar, disabled: state.battery <= 0 });
+  if (chapter().mechanics.includes('stalker')) actions.push({ label: 'Прислушаться к преследователю', action: listenThreat });
+  if (r.exit) actions.push({ label: chapter().id === 'zero' ? 'Войти в ядро' : 'Перейти на следующий уровень', action: tryExit });
+
+  const exits = Object.entries(r.exits || {});
+  exits.forEach(([dir, id]) => {
+    const known = !chapter().mechanics.includes('darkness') || state.sonarRevealedRoom === state.roomId;
+    const target = known ? chapter().rooms[id].name : 'неизвестный проход';
+    actions.push({ label: `Идти: ${DIRECTION_NAMES[dir]} — ${target}`, action: () => moveTo(id, dir) });
+  });
+
+  if (state.power <= 0 && !state.manualCrankUsed) actions.unshift({ label: 'Аварийная ручная зарядка', action: manualCrank });
+  setChoices(actions);
+}
+
+function moveTo(id, direction) {
+  if (!room().exits || !Object.values(room().exits).includes(id)) {
+    announce('Логическая ошибка маршрута предотвращена: такого перехода нет.', true);
+    showRoomActions();
+    return;
+  }
+  playUi('step');
+  state.roomId = id;
+  state.sonarRevealedRoom = null;
+  enterRoom(true, `Ты идёшь на ${DIRECTION_NAMES[direction]}.`);
+}
+
+function consumeTurn(extraPressure = 0) {
+  state.turn += 1;
+  state.power = clamp(state.power - 1, 0, 100);
+  if (chapter().mechanics.includes('pressure')) state.pressure = clamp(state.pressure + extraPressure, 0, 120);
+  advanceHazards();
+  renderAll();
+  saveCurrent();
+  if (checkFailure()) return false;
+  if (checkThreatEncounter()) return false;
+  return true;
+}
+
+function advanceHazards() {
+  const c = chapter();
+  if (c.mechanics.includes('pressure') && state.chapterProgress.valves < (c.required.valves || 0)) {
+    state.pressure = clamp(state.pressure + 4, 0, 120);
+    if (state.pressure >= 75) {
+      playPressure();
+      damage(state.pressure >= 95 ? 10 : 4, 'Давление рвёт уплотнения.');
+    }
+  }
+  if (c.mechanics.includes('stalker')) moveThreat();
+}
+
+function damage(amount, reason = '') {
+  const actual = Math.max(1, amount - state.mods.damageReduce);
+  state.health = clamp(state.health - actual, 0, 100);
+  if (reason) els.alert.textContent = `${reason} Минус ${actual} здоровья.`;
+}
+
+function checkFailure() {
+  if (state.health <= 0) return fail('Скафандр больше не держит нагрузку.');
+  if (state.oxygen <= 0) return fail('Кислород закончился. Последним сигналом снова был твой голос.');
+  if (state.pressure >= 110) return fail('Контур не выдержал давления. Палубу разорвало.');
+  return false;
+}
+
+function fail(reason) {
+  state.score = Math.max(0, state.score - 150);
+  showScreen('ending');
+  els.endingTitle.textContent = 'Смена оборвалась';
+  els.endingText.textContent = reason;
+  els.endingStats.textContent = `Глава ${chapter().number}, ход ${state.turn}, очки ${state.score}. Прогресс главы можно перезапустить с контрольной точки.`;
+  $('epilogue-button').textContent = 'Повторить главу';
+  $('epilogue-button').onclick = restartChapter;
+  $('new-run-button').textContent = 'Вернуться в меню';
+  $('new-run-button').onclick = () => showScreen('start');
+  playUi('danger');
+  return true;
+}
+
+function startSignal() {
+  const key = signalKey();
+  if (state.pendingSignals[key]) {
+    currentSignal = state.pendingSignals[key];
+    announce('Канал снова открыт. Его параметры не изменились после выхода из анализа.');
+    showSignalChoices();
+    return;
+  }
+  const base = pick(SIGNAL_LINES);
+  currentSignal = {
+    ...base,
+    direction: pick(['left','center','right']),
+    physical: base.real ? pick(['совпадает с аварийным ретранслятором','несущая стабильна','в канале есть дыхание живого человека']) : pick(['источник физически находится внутри стены','фаза повторяется с невозможной точностью','голос есть, но дыхания нет']),
+    listened: false,
+    scanned: false,
+    traced: false
+  };
+  state.pendingSignals[key] = currentSignal;
+  state.totalSignals += 1;
+  saveCurrent();
+  announce('Канал открыт. Сначала прослушай передачу или проверь её приборами. Ошибочное решение имеет последствия.');
+  showSignalChoices();
+}
+
+function showSignalChoices(extra = '') {
+  if (extra) announce(extra);
+  const items = [
+    { label: 'Прослушать передачу', action: listenSignal },
+    { label: `Сканировать канал (${state.scanner})`, action: scanSignal, disabled: state.scanner <= 0 },
+    { label: 'Проверить источник вручную', action: traceSignal },
+    { label: 'Принять сигнал за настоящий', action: () => resolveSignal(true) },
+    { label: 'Отклонить сигнал как имитацию', action: () => resolveSignal(false) },
+    { label: 'Вернуться к помещению', action: () => { currentSignal = null; enterRoom(false); } }
+  ];
+  setChoices(items);
+}
+
+function listenSignal() {
+  currentSignal.listened = true;
+  playSignal(currentSignal);
+  const dir = currentSignal.direction === 'left' ? 'слева' : currentSignal.direction === 'right' ? 'справа' : 'по центру';
+  announce(`Передача ${dir}: «${currentSignal.line}» Ритм несущей: ${currentSignal.rhythm === 'stable' ? 'ровный' : 'сбитый'}.`);
+  showSignalChoices();
+}
+
+function scanSignal() {
+  if (state.scanner <= 0) return showSignalChoices('Сканер разряжен. Используй ручную проверку — она медленнее, но всегда доступна.');
+  state.scanner -= 1;
+  currentSignal.scanned = true;
+  consumeTurn(1);
+  announce(`Результат сканирования: ${currentSignal.physical}.`);
+  showSignalChoices();
+}
+
+function traceSignal() {
+  currentSignal.traced = true;
+  if (!consumeTurn(2)) return;
+  const clue = currentSignal.real
+    ? 'Кабель действительно уходит к действующему передатчику. Пакеты имеют естественные потери.'
+    : 'Кабель обрывается в двух метрах от стены, но голос продолжает идти без задержки.';
+  announce(`Ручная проверка: ${clue}`);
+  showSignalChoices();
+}
+
+function resolveSignal(acceptedReal) {
+  const correct = acceptedReal === currentSignal.real;
+  const id = signalKey();
+  if (!state.resolvedSignalRooms.includes(id)) state.resolvedSignalRooms.push(id);
+  state.chapterProgress.signals += 1;
+  if (correct) {
+    state.correctSignals += 1;
+    state.score += 180;
+    if (currentSignal.real) {
+      state.fragments += 1;
+      state.oxygen = clamp(state.oxygen + 8, 0, 100);
+    } else {
+      state.stun = clamp(state.stun + 1, 0, 5);
+    }
+    playUi('success');
+    delete state.pendingSignals[id];
+    currentSignal = null;
+    renderAll();
+    announce(acceptedReal ? 'Решение верное. Канал подключён, координаты сохранены.' : 'Решение верное. Имитация отсечена до рукопожатия.');
+  } else {
+    state.wrongSignals += 1;
+    state.score = Math.max(0, state.score - 100);
+    damage(12, acceptedReal ? 'Имитация получила доступ к локальной сети.' : 'Ты оборвал настоящий аварийный канал.');
+    if (chapter().mechanics.includes('stalker')) state.threatFrozen = 0;
+    delete state.pendingSignals[id];
+    currentSignal = null;
+    renderAll();
+    announce('Решение оказалось ошибочным. Система записала последствия, но прохождение остаётся возможным.', true);
+  }
+  if (checkFailure()) return;
+  setChoices([{ label: 'Продолжить', action: () => enterRoom(false) }]);
+  saveCurrent();
+}
+
+function startTask(type) {
+  if (type === 'repair') startRepair();
+  else if (type === 'valve') startValve();
+  else if (type === 'key') startKey();
+}
+
+function startRepair() {
+  challenge = { type: 'repair', sequence: [randInt(3),randInt(3),randInt(3)], step: 0, mistakes: 0 };
+  announce('Ремонт: повтори три частоты по очереди. Можно переслушивать текущий тон сколько угодно.');
+  repairStep();
+}
+function repairStep(prefix = '') {
+  const idx = challenge.sequence[challenge.step];
+  playRepairTone(idx);
+  if (prefix) announce(prefix);
+  setChoices([
+    { label: 'Повторить текущий тон', action: () => repairStep('Тон повторён.') },
+    { label: 'Низкая частота', action: () => answerRepair(0) },
+    { label: 'Средняя частота', action: () => answerRepair(1) },
+    { label: 'Высокая частота', action: () => answerRepair(2) },
+    { label: 'Отложить ремонт', action: () => { challenge = null; enterRoom(false); } }
+  ]);
+}
+function answerRepair(answer) {
+  if (answer === challenge.sequence[challenge.step]) {
+    challenge.step += 1;
+    state.score += 35;
+    if (challenge.step >= challenge.sequence.length) return completeTask('repair', 'Контур синхронизирован. Энергия восстановлена.', 20);
+    repairStep(`Верно. Частота ${challenge.step + 1} из ${challenge.sequence.length}.`);
+  } else {
+    challenge.mistakes += 1;
+    state.score = Math.max(0, state.score - 20);
+    if (!state.mods.safeRepair) damage(5, 'Обратный импульс прошёл через перчатки.');
+    state.power = clamp(state.power - 6, 0, 100);
+    if (checkFailure()) return;
+    repairStep('Неверная частота. Последовательность не сброшена; попробуй этот шаг ещё раз.');
+  }
+  renderAll();
+}
+
+function startValve() {
+  const options = ['Повернуть влево', 'Удерживать', 'Повернуть вправо'];
+  challenge = { type: 'valve', sequence: [randInt(3),randInt(3),randInt(3)], step: 0, options };
+  announce('Клапан заклинило. Манометр подаёт три команды. Команда доступна текстом и звуком; выполняй по одной.');
+  valveStep();
+}
+function valveStep(prefix = '') {
+  const cueNames = ['низкий стук: влево', 'двойной щелчок: удерживать', 'высокий звон: вправо'];
+  const idx = challenge.sequence[challenge.step];
+  playRepairTone(idx);
+  announce(`${prefix ? prefix + ' ' : ''}Команда ${challenge.step + 1}: ${cueNames[idx]}.`);
+  setChoices(challenge.options.map((label, i) => ({ label, action: () => answerValve(i) })).concat([
+    { label: 'Отойти от клапана', action: () => { challenge = null; enterRoom(false); } }
+  ]));
+}
+function answerValve(answer) {
+  if (answer === challenge.sequence[challenge.step]) {
+    challenge.step += 1;
+    if (challenge.step >= challenge.sequence.length) return completeTask('valves', 'Клапан закрыт. Давление резко падает.', -28);
+    valveStep('Команда выполнена.');
+  } else {
+    state.pressure = clamp(state.pressure + 12, 0, 120);
+    damage(6, 'Клапан дал обратный выброс.');
+    if (checkFailure()) return;
+    valveStep('Неверное движение. Текущая команда остаётся той же.');
+  }
+  renderAll();
+}
+
+function startKey() {
+  const words = pick([
+    ['ноль','семь','север'], ['орфей','тишина','возврат'], ['вода','помнит','голос']
+  ]);
+  challenge = { type: 'key', words, step: 0 };
+  announce(`Архив передаёт последовательность: ${words.join(', ')}. Повтори слова по порядку.`);
+  keyStep();
+}
