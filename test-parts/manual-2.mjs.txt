@@ -1,0 +1,172 @@
+  await move(page,'юг'); await handleEncounter(page);
+  await move(page,'восток'); await handleEncounter(page);
+  await click(page,/Перейти на следующий уровень/);
+  await chooseUpgrade(page);
+  assert((await state(page)).chapterIndex===4,'Переход в пятую главу');
+
+  await rechargeIf(page);
+  await move(page,'запад'); await handleEncounter(page);
+  await signalIf(page,{scan:false,trace:true});
+  await move(page,'север'); await handleEncounter(page);
+  await doRepair(page);
+  await move(page,'юг'); await handleEncounter(page);
+  await move(page,'запад'); await handleEncounter(page);
+  await doValve(page);
+  await move(page,'восток'); await handleEncounter(page);
+  await move(page,'юг'); await handleEncounter(page);
+  await signalIf(page,{scan:false,trace:true});
+  await salvageIf(page);
+  await move(page,'восток'); await handleEncounter(page);
+  await doRepair(page);
+  await signalIf(page,{scan:false,trace:true});
+  await move(page,'север'); await handleEncounter(page);
+  await click(page,/Войти в ядро/);
+  const finaleChoices=await choiceTexts(page);
+  assert(finaleChoices.some(t=>/вывести уцелевших/.test(t) && !/недостаточно/.test(t)),'Хороший финал достижим честным прохождением');
+  await click(page,/Собрать память и вывести уцелевших/);
+  assert(/Настоящая нулевая смена/.test(await page.locator('#ending-title').textContent()),'Получен полный финал');
+  const fs=await state(page);
+  assert(fs.completed && fs.ending==='rescue','Финальное состояние корректно сохранено в памяти');
+  assert(errors.length===0,'Полное прохождение без ошибок JavaScript',errors.join('\n'));
+  await page.close();
+}
+
+async function logicScenarios() {
+  const {page,errors}=await newPage();
+  await click(page,/Новая смена/);
+  await move(page,'восток');
+  await click(page,/Прослушать неизвестный сигнал/);
+  const first=await currentSignal(page);
+  await click(page,/Вернуться к помещению/);
+  await click(page,/Прослушать неизвестный сигнал/);
+  const second=await currentSignal(page);
+  assert(JSON.stringify(first)===JSON.stringify(second),'Выход из анализа не перегенерирует сигнал');
+  await resolveSignal(page,{scan:false,wrong:true});
+  const bad=await state(page);
+  assert(bad.wrongSignals===1 && bad.health<100,'Ошибочная классификация имеет последствия, но игра продолжается');
+
+  await page.evaluate(()=>window.__zeroShiftTest.goRoom('lift'));
+  await click(page,/Перейти на следующий уровень/);
+  assert((await state(page)).chapterIndex===0,'Нельзя пропустить обязательные задачи главы');
+
+  await page.evaluate(()=>window.__zeroShiftTest.forceState({power:0,manualCrankUsed:false}));
+  assert((await choiceTexts(page)).some(t=>/Аварийная ручная зарядка/.test(t)),'При нулевой энергии доступен выход из тупика');
+  await click(page,/Аварийная ручная зарядка/); await continueAction(page);
+  assert((await state(page)).power===18,'Ручной генератор действительно восстанавливает энергию');
+
+  await page.evaluate(()=>window.__zeroShiftTest.forceState({oxygen:2}));
+  await move(page,'север');
+  assert(/Смена оборвалась/.test(await page.locator('#ending-title').textContent()),'Нулевая шкала кислорода корректно завершает забег');
+  await click(page,/Повторить главу/);
+  assert((await state(page)).oxygen===100,'Перезапуск главы восстанавливает контрольную точку');
+
+  await page.evaluate(()=>window.__zeroShiftTest.startChapter(2));
+  await page.evaluate(()=>window.__zeroShiftTest.forceState({pressure:108}));
+  await move(page,'восток');
+  assert(/Смена оборвалась/.test(await page.locator('#ending-title').textContent()),'Критическое давление корректно завершает забег');
+
+  assert(errors.length===0,'Сценарии тупиков без ошибок JavaScript',errors.join('\n'));
+  await page.close();
+}
+
+async function stalkerScenarios() {
+  async function encounter(preference, patch={}, randomValue=null) {
+    const {page,errors}=await newPage();
+    await click(page,/Новая смена/);
+    await page.evaluate(()=>window.__zeroShiftTest.startChapter(3));
+    if(randomValue!==null) await page.evaluate(v=>{Math.random=()=>v;},randomValue);
+    await page.evaluate(p=>window.__zeroShiftTest.forceState({...p, threatRoom:'ringA', threatFrozen:1}),patch);
+    const before=await state(page);
+    await move(page,'восток');
+    const choices=await choiceTexts(page);
+    assert(choices.some(t=>/Имитатор|Заблокировать|оглушающий|Замереть|Рвануть/.test(t)),'Преследователь вызывает полноценное столкновение');
+    if(preference==='lock') {
+      await click(page,/Заблокировать переборку/); await continueAction(page);
+      assert((await state(page)).battery===before.battery-1,'Блокировка тратит батарею');
+    } else if(preference==='stun') {
+      await click(page,/оглушающий импульс/); await continueAction(page);
+      assert((await state(page)).stun===before.stun-1,'Оглушение тратит импульс');
+    } else if(preference==='hide') {
+      await click(page,/Замереть и спрятаться/); await continueAction(page);
+      const after=await state(page);
+      assert(randomValue>.38 ? after.health===before.health : after.health<before.health,'Укрытие учитывает успех и провал');
+    } else if(preference==='flee') {
+      await click(page,/Рвануть/);
+      const after=await state(page);
+      assert(after.roomId!=='ringA' && after.health<before.health,'Побег меняет комнату и наносит урон');
+    }
+    assert(errors.length===0,`Столкновение ${preference} без ошибок JavaScript`,errors.join('\n'));
+    await page.close();
+  }
+  await encounter('lock');
+  await encounter('stun',{battery:0,stun:2});
+  await encounter('hide',{battery:0,stun:0},0.9);
+  await encounter('hide',{battery:0,stun:0},0.1);
+  await encounter('flee',{battery:0,stun:0});
+}
+
+async function saveAndAccessibility() {
+  const {page,errors}=await newPage();
+  await click(page,/Новая смена/);
+  await page.keyboard.press('2');
+  assert((await state(page)).roomId==='corridor','Горячая клавиша действия работает');
+  await click(page,/Пауза/);
+  await click(page,/Сохранить и выйти/);
+  assert(await page.getByRole('button',{name:/Продолжить/}).isVisible(),'После сохранения появляется кнопка продолжения');
+  await click(page,/Продолжить/);
+  assert((await state(page)).roomId==='corridor','Сохранение восстанавливает точную комнату');
+  await page.keyboard.press('m');
+  assert(/Карта/.test(await page.locator('#log').textContent()),'Горячая клавиша карты работает');
+  await page.keyboard.press('r');
+  assert(/Статус/.test(await page.locator('#log').textContent()),'Горячая клавиша статуса работает');
+
+  const ids=await page.evaluate(()=>{
+    const all=[...document.querySelectorAll('[id]')].map(x=>x.id);
+    return all.filter((id,i)=>all.indexOf(id)!==i);
+  });
+  assert(ids.length===0,'На странице нет дублирующихся id');
+  const unnamed=await page.evaluate(()=>[...document.querySelectorAll('button')].filter(b=>!b.innerText.trim()&&!b.getAttribute('aria-label')).length);
+  assert(unnamed===0,'Все кнопки имеют доступные имена');
+  const live=await page.locator('[aria-live]').count();
+  assert(live>=2,'События доступны через live-регионы');
+  assert(errors.length===0,'Сохранение и доступность без ошибок JavaScript',errors.join('\n'));
+  await page.close();
+
+  const mobile=await newPage({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  await click(mobile.page,/Новая смена/);
+  const overflow=await mobile.page.evaluate(()=>document.documentElement.scrollWidth>document.documentElement.clientWidth);
+  assert(!overflow,'На мобильном экране нет горизонтального переполнения');
+  await mobile.page.getByRole('button',{name:/Идти: восток/}).tap();
+  assert((await state(mobile.page)).roomId==='corridor','Сенсорное управление работает');
+  assert(mobile.errors.length===0,'Мобильный сценарий без ошибок JavaScript',mobile.errors.join('\n'));
+  await mobile.page.close();
+}
+
+async function lockedFinale() {
+  const {page,errors}=await newPage();
+  await click(page,/Новая смена/);
+  await page.evaluate(()=>window.__zeroShiftTest.startChapter(4));
+  await page.evaluate(()=>window.__zeroShiftTest.completeRequirements());
+  await page.evaluate(()=>window.__zeroShiftTest.forceState({fragments:0, threatRoom:null}));
+  await page.evaluate(()=>window.__zeroShiftTest.goRoom('core'));
+  await click(page,/Войти в ядро/);
+  const choices=await choiceTexts(page);
+  assert(choices.some(t=>/недостаточно фрагментов/.test(t)),'Секретный финал честно заблокирован без фрагментов');
+  await click(page,/недостаточно фрагментов/);
+  assert(!(await state(page)).completed,'Нажатие на заблокированный финал не завершает игру');
+  await click(page,/Стереть ядро/);
+  assert((await state(page)).ending==='purge','Альтернативный финал работает');
+  assert(errors.length===0,'Финальные ветки без ошибок JavaScript',errors.join('\n'));
+  await page.close();
+}
+
+try {
+  await fullRun();
+  await logicScenarios();
+  await stalkerScenarios();
+  await saveAndAccessibility();
+  await lockedFinale();
+  console.log(`\nMANUAL PLAYTHROUGH COMPLETE: ${results.length} checks passed.`);
+} finally {
+  await browser.close();
+}
