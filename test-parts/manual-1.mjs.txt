@@ -1,0 +1,220 @@
+import { chromium } from 'playwright';
+
+const URL = process.env.GAME_URL || 'http://127.0.0.1:4173/?test=1';
+const browser = await chromium.launch({
+  headless: true,
+  executablePath: process.env.CHROMIUM_PATH || undefined,
+  args: ['--no-sandbox', '--allow-file-access-from-files', '--disable-web-security', '--disable-dev-shm-usage']
+});
+
+const results = [];
+function record(name, ok, detail='') {
+  results.push({name, ok, detail});
+  console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
+  if (!ok) throw new Error(`${name}: ${detail}`);
+}
+function assert(cond, name, detail='') { record(name, Boolean(cond), detail); }
+
+async function newPage(opts={}) {
+  const page = await browser.newPage(opts);
+  const errors=[];
+  page.on('pageerror', e=>errors.push(e.stack || e.message));
+  page.on('console', m=>{ if (m.type()==='error') errors.push(m.text()); });
+  await page.goto(URL);
+  return {page, errors};
+}
+async function click(page, pattern) {
+  const locator = page.getByRole('button', {name: pattern}).first();
+  await locator.waitFor({state:'visible'});
+  await locator.click();
+  await page.waitForTimeout(5);
+}
+async function choiceTexts(page) { return page.locator('#choices button').allTextContents(); }
+async function state(page) { return page.evaluate(() => window.__zeroShiftTest.getState()); }
+async function currentSignal(page) { return page.evaluate(() => window.__zeroShiftTest.getSignal()); }
+async function currentChallenge(page) { return page.evaluate(() => window.__zeroShiftTest.getChallenge()); }
+async function continueAction(page) {
+  const b=page.getByRole('button',{name:/Продолжить/}).first();
+  if (await b.isVisible().catch(()=>false)) await b.click();
+}
+async function move(page, dir) { await click(page, new RegExp(`Идти: ${dir}`,'i')); }
+
+async function handleEncounter(page, preference='auto') {
+  const choices = await choiceTexts(page);
+  const encounter = choices.some(t=>/Заблокировать переборку|оглушающий импульс|Замереть и спрятаться|Рвануть/.test(t));
+  if (!encounter) return false;
+  if (preference==='lock' && choices.some(t=>/Заблокировать/.test(t))) await click(page,/Заблокировать переборку/);
+  else if (preference==='stun' && choices.some(t=>/оглушающий импульс/.test(t))) await click(page,/оглушающий импульс/);
+  else if (preference==='hide') await click(page,/Замереть и спрятаться/);
+  else if (preference==='flee') await click(page,/Рвануть/);
+  else if (choices.some(t=>/Заблокировать/.test(t))) await click(page,/Заблокировать переборку/);
+  else if (choices.some(t=>/оглушающий импульс/.test(t))) await click(page,/оглушающий импульс/);
+  else await click(page,/Замереть и спрятаться/);
+  await continueAction(page);
+  return true;
+}
+
+async function resolveSignal(page, {scan=true, trace=false, wrong=false}={}) {
+  await click(page,/Прослушать передачу/);
+  let sig = await currentSignal(page);
+  assert(Boolean(sig), 'Сигнал остаётся активным после прослушивания');
+  if (scan) {
+    const choices=await choiceTexts(page);
+    if (choices.some(t=>/Сканировать канал \([1-9]/.test(t))) {
+      await click(page,/Сканировать канал/);
+      if (await handleEncounter(page)) {
+        await click(page,/Прослушать неизвестный сигнал/);
+        sig=await currentSignal(page);
+      }
+    }
+  }
+  if (trace) {
+    await click(page,/Проверить источник вручную/);
+    if (await handleEncounter(page)) {
+      await click(page,/Прослушать неизвестный сигнал/);
+      sig=await currentSignal(page);
+    }
+  }
+  sig = await currentSignal(page);
+  const accept = wrong ? !sig.real : sig.real;
+  await click(page, accept ? /Принять сигнал за настоящий/ : /Отклонить сигнал как имитацию/);
+  await continueAction(page);
+}
+
+async function doSignalHere(page, options={}) {
+  await click(page,/Прослушать неизвестный сигнал/);
+  await resolveSignal(page, options);
+}
+
+const toneLabels=[/Низкая частота/,/Средняя частота/,/Высокая частота/];
+async function doRepair(page, wrongOnce=false) {
+  await click(page,/Начать ремонт/);
+  let ch=await currentChallenge(page);
+  if (wrongOnce) {
+    const wrong=(ch.sequence[ch.step]+1)%3;
+    await click(page,toneLabels[wrong]);
+    const after=await currentChallenge(page);
+    assert(after.step===ch.step,'Ошибка ремонта не сбрасывает уже пройденные шаги');
+  }
+  while ((ch=await currentChallenge(page))) {
+    await click(page,toneLabels[ch.sequence[ch.step]]);
+  }
+  await continueAction(page);
+}
+
+const valveLabels=[/Повернуть влево/,/Удерживать/,/Повернуть вправо/];
+async function doValve(page, wrongOnce=false) {
+  await click(page,/Закрыть клапан/);
+  let ch=await currentChallenge(page);
+  if (wrongOnce) {
+    const wrong=(ch.sequence[ch.step]+1)%3;
+    await click(page,valveLabels[wrong]);
+    const after=await currentChallenge(page);
+    assert(after.step===ch.step,'Ошибка клапана не сбрасывает последовательность');
+  }
+  while ((ch=await currentChallenge(page))) {
+    await click(page,valveLabels[ch.sequence[ch.step]]);
+  }
+  await continueAction(page);
+}
+
+async function doKey(page) {
+  await click(page,/Извлечь голосовой ключ/);
+  let ch;
+  while ((ch=await currentChallenge(page))) {
+    const word=ch.words[ch.step];
+    await click(page,new RegExp(word,'i'));
+  }
+  await continueAction(page);
+}
+
+async function rechargeIf(page) {
+  const c=await choiceTexts(page);
+  if(c.some(t=>/Подзарядить инструменты/.test(t))) { await click(page,/Подзарядить инструменты/); await continueAction(page); }
+}
+async function salvageIf(page) {
+  const c=await choiceTexts(page);
+  if(c.some(t=>/Разобрать найденное/.test(t))) { await click(page,/Разобрать найденное/); if (!(await handleEncounter(page))) await continueAction(page); }
+}
+async function signalIf(page, opts={}) {
+  const c=await choiceTexts(page);
+  if(c.some(t=>/Прослушать неизвестный сигнал/.test(t))) await doSignalHere(page,opts);
+}
+async function chooseUpgrade(page) {
+  const buttons=page.locator('#choices button');
+  assert(await buttons.count()>=1,'После главы предлагается улучшение');
+  await buttons.first().click();
+}
+
+async function fullRun() {
+  const {page,errors}=await newPage();
+  await click(page,/Новая смена/);
+  await rechargeIf(page);
+  await move(page,'восток');
+  await doSignalHere(page,{scan:true,trace:true});
+  await move(page,'север');
+  await doRepair(page,true);
+  await signalIf(page,{scan:true});
+  await move(page,'юг');
+  await move(page,'юг');
+  await click(page,/Перейти на следующий уровень/);
+  await chooseUpgrade(page);
+  assert((await state(page)).chapterIndex===1,'Переход во вторую главу');
+
+  await rechargeIf(page);
+  await move(page,'север');
+  await click(page,/Импульс сонара/);
+  const sonarText=await page.locator('#log').textContent();
+  assert(/локальную карту/.test(sonarText),'Сонар раскрывает локальную карту');
+  await signalIf(page,{scan:true});
+  await move(page,'запад');
+  await doRepair(page);
+  await move(page,'восток');
+  await move(page,'восток');
+  await salvageIf(page); await rechargeIf(page);
+  await move(page,'север');
+  await doRepair(page);
+  await signalIf(page,{scan:false,trace:true});
+  await move(page,'юг');
+  await move(page,'запад');
+  await move(page,'север');
+  await move(page,'север');
+  await click(page,/Перейти на следующий уровень/);
+  await chooseUpgrade(page);
+  assert((await state(page)).chapterIndex===2,'Переход в третью главу');
+
+  await rechargeIf(page);
+  await move(page,'восток');
+  await signalIf(page,{scan:true});
+  await move(page,'север');
+  await doValve(page,true);
+  await move(page,'восток');
+  await doValve(page);
+  await signalIf(page,{scan:false,trace:true});
+  await move(page,'юг');
+  await salvageIf(page);
+  await move(page,'запад');
+  await move(page,'юг');
+  await doValve(page);
+  await move(page,'восток');
+  await click(page,/Перейти на следующий уровень/);
+  await chooseUpgrade(page);
+  assert((await state(page)).chapterIndex===3,'Переход в четвёртую главу');
+
+  await rechargeIf(page);
+  await move(page,'восток'); await handleEncounter(page,'lock');
+  await signalIf(page,{scan:false,trace:true});
+  await move(page,'север'); await handleEncounter(page);
+  await doKey(page);
+  await signalIf(page,{scan:true});
+  await move(page,'юг'); await handleEncounter(page);
+  await move(page,'юг'); await handleEncounter(page);
+  await doKey(page); await salvageIf(page);
+  await move(page,'восток'); await handleEncounter(page,'stun');
+  const healChoices=await choiceTexts(page);
+  if(healChoices.some(t=>/медицинский модуль/i.test(t))){await click(page,/медицинский модуль/i);if (!(await handleEncounter(page))) await continueAction(page);}
+  await signalIf(page,{scan:false,trace:true});
+  await move(page,'север'); await handleEncounter(page);
+  await signalIf(page,{scan:false,trace:true});
+  await move(page,'север'); await handleEncounter(page);
+  await doKey(page);
