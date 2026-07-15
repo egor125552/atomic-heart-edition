@@ -1,0 +1,109 @@
+    purge: ['Чистая тишина', 'Ты запускаешь стирание. Станция замолкает навсегда. Спасательные корабли находят тебя одного. В пустом журнале остаётся строка: «Нулевая смена выполнена».'],
+    merge: ['Дежурный навсегда', 'Ты открываешь нейроинтерфейс. Границы между памятью станции, имитацией и тобой исчезают. Когда прибывают спасатели, «Орфей-9» приветствует их твоим голосом.']
+  };
+  els.endingTitle.textContent = endings[type][0];
+  els.endingText.textContent = endings[type][1];
+  els.endingStats.textContent = `Итог: ${state.score} очков, точность сигналов ${accuracy}%, ремонтов ${state.repairs}, клапанов ${state.valves}, найдено фрагментов ${state.fragments}.`;
+  $('epilogue-button').textContent = 'Прослушать эпилог';
+  $('epilogue-button').onclick = () => speak(`${els.endingTitle.textContent}. ${els.endingText.textContent}. ${els.endingStats.textContent}`, true);
+  $('new-run-button').textContent = 'Новая смена+';
+  $('new-run-button').onclick = () => {
+    const run = (state.run || 1) + 1;
+    state = makeState();
+    state.run = run;
+    state.scanner += 1;
+    beginChapter(0, true);
+  };
+  playUi('success');
+}
+
+function contextReturnChoice() {
+  if (currentSignal) return { label: 'Вернуться к анализу сигнала', action: showSignalChoices };
+  if (challenge?.type === 'repair') return { label: 'Вернуться к ремонту', action: () => repairStep('Ремонт продолжен.') };
+  if (challenge?.type === 'valve') return { label: 'Вернуться к клапану', action: () => valveStep('Работа продолжена.') };
+  if (challenge?.type === 'key') return { label: 'Вернуться к голосовому ключу', action: () => keyStep('Извлечение продолжено.') };
+  if (state.threatRoom === state.roomId) return { label: 'Вернуться к столкновению', action: checkThreatEncounter };
+  return null;
+}
+function restoreContextOrRoom() {
+  const back = contextReturnChoice();
+  if (back) setChoices([back]); else showRoomActions();
+}
+function showMap() {
+  if (!state) return;
+  const r = room();
+  const exits = Object.entries(r.exits || {}).map(([d,id]) => `${DIRECTION_NAMES[d]} — ${chapter().rooms[id].name}`).join('; ') || 'нет выходов';
+  const threat = chapter().mechanics.includes('stalker') ? ` Преследователь: ${threatDistance() <= 1 ? 'очень близко' : threatDistance() === 2 ? 'рядом' : 'далеко'}.` : '';
+  announce(`Карта. Ты в помещении «${r.name}». Выходы: ${exits}.${threat}`);
+  restoreContextOrRoom();
+}
+function showStatusText() {
+  announce(`Статус: здоровье ${state.health}, кислород ${state.oxygen}, энергия ${state.power}, давление ${state.pressure}, сканер ${state.scanner}, батарея ${state.battery}, импульсы ${state.stun}. ${progressText()}.`);
+  restoreContextOrRoom();
+}
+function pause() {
+  if (!state || screens.game.hidden) return;
+  showScreen('pause');
+}
+function resume() {
+  showScreen('game');
+  renderAll();
+  if (state.threatRoom === state.roomId) checkThreatEncounter();
+  else restoreContextOrRoom();
+}
+
+function saveExit() {
+  saveCurrent();
+  showScreen('start');
+  announceMenu('Смена сохранена.');
+}
+function announceMenu(text) {
+  $('subtitle').textContent = text;
+  speak(text, settings.tts);
+}
+
+$('new-game').addEventListener('click', newGame);
+$('continue-game').addEventListener('click', continueGame);
+$('how-to').addEventListener('click', () => $('how-panel').hidden = !$('how-panel').hidden);
+$('tts-toggle').addEventListener('change', updateSettings);
+$('audio-toggle').addEventListener('change', updateSettings);
+$('reduced-motion').addEventListener('change', updateSettings);
+$('status-button').addEventListener('click', showStatusText);
+$('map-button').addEventListener('click', showMap);
+$('pause-button').addEventListener('click', pause);
+$('resume-button').addEventListener('click', resume);
+$('save-exit-button').addEventListener('click', saveExit);
+$('restart-chapter-button').addEventListener('click', restartChapter);
+
+document.addEventListener('keydown', event => {
+  if (event.altKey || event.ctrlKey || event.metaKey) return;
+  if (/^[1-9]$/.test(event.key) && !screens.game.hidden) {
+    const button = els.choices.querySelector(`[data-choice="${event.key}"]`);
+    if (button && !button.disabled) { event.preventDefault(); button.click(); }
+  } else if (event.key.toLowerCase() === 'r' && !screens.game.hidden) {
+    event.preventDefault(); showStatusText();
+  } else if (event.key.toLowerCase() === 'm' && !screens.game.hidden) {
+    event.preventDefault(); showMap();
+  } else if (event.key.toLowerCase() === 's' && !screens.game.hidden && chapter().mechanics.includes('darkness') && !currentSignal && !challenge) {
+    event.preventDefault(); sonar();
+  } else if (event.key === 'Escape') {
+    event.preventDefault(); screens.pause.hidden ? pause() : resume();
+  }
+});
+
+applySettings();
+const existing = normalizeLoaded(loadJson(SAVE_KEY));
+$('continue-game').hidden = !existing;
+
+if (testMode) {
+  window.__zeroShiftTest = {
+    getState: () => JSON.parse(JSON.stringify(state)),
+    getChapter: () => state ? chapter().id : null,
+    getSignal: () => currentSignal ? JSON.parse(JSON.stringify(currentSignal)) : null,
+    getChallenge: () => challenge ? JSON.parse(JSON.stringify(challenge)) : null,
+    forceState: patch => { Object.assign(state, patch); renderAll(); showRoomActions(); },
+    goRoom: id => { if (chapter().rooms[id]) { state.roomId = id; enterRoom(false, 'Тестовый переход.'); } },
+    completeRequirements: () => { for (const [k,v] of Object.entries(chapter().required)) state.chapterProgress[k] = v; renderAll(); showRoomActions(); },
+    startChapter: index => beginChapter(index, index === 0)
+  };
+}
