@@ -1,0 +1,246 @@
+function keyStep(prefix = '') {
+  const correct = challenge.words[challenge.step];
+  const pool = Array.from(new Set([...challenge.words, 'шлюз', 'эхо', 'контур'])).sort(() => Math.random() - .5).slice(0, 5);
+  if (!pool.includes(correct)) pool[0] = correct;
+  setChoices(pool.map(word => ({ label: word, action: () => answerKey(word) })).concat([
+    { label: 'Повторить всю последовательность', action: () => { announce(`Последовательность: ${challenge.words.join(', ')}.`); keyStep(); } },
+    { label: 'Отложить извлечение', action: () => { challenge = null; enterRoom(false); } }
+  ]));
+  if (prefix) announce(prefix);
+}
+function answerKey(word) {
+  if (word === challenge.words[challenge.step]) {
+    challenge.step += 1;
+    if (challenge.step >= challenge.words.length) return completeTask('keys', 'Голосовой ключ извлечён и зашифрован.', 0);
+    keyStep(`Верно. Осталось слов: ${challenge.words.length - challenge.step}.`);
+  } else {
+    state.power = clamp(state.power - 5, 0, 100);
+    keyStep('Неверное слово. Последовательность не сброшена.');
+  }
+  renderAll();
+}
+
+function completeTask(kind, message, systemDelta) {
+  const key = taskKey();
+  if (!state.completedTasks.includes(key)) state.completedTasks.push(key);
+  state.chapterProgress[kind] += 1;
+  if (kind === 'repair') { state.repairs += 1; state.power = clamp(state.power + systemDelta, 0, 100); }
+  if (kind === 'valves') { state.valves += 1; state.pressure = clamp(state.pressure + systemDelta, 0, 120); }
+  if (kind === 'keys') { state.keys += 1; state.fragments += 1; }
+  state.score += 220;
+  challenge = null;
+  playUi('success');
+  renderAll();
+  announce(message);
+  setChoices([{ label: 'Продолжить', action: () => enterRoom(false) }]);
+  saveCurrent();
+}
+
+function salvage() {
+  const key = taskKey();
+  if (state.salvagedRooms.includes(key)) return enterRoom(false, 'Здесь больше нечего разбирать.');
+  state.salvagedRooms.push(key);
+  state.scrap += 1;
+  state.scanner += 1;
+  state.battery += 1;
+  state.score += 70;
+  if (chapter().id === 'zero') state.fragments += 1;
+  if (!consumeTurn(2)) return;
+  renderAll();
+  announce('Ты находишь заряд сканера, батарею и пригодный модуль.');
+  setChoices([{ label: 'Продолжить', action: () => enterRoom(false) }]);
+}
+function heal() {
+  const key = taskKey();
+  state.usedHealRooms.push(key);
+  state.health = clamp(state.health + 35, 0, 100);
+  state.oxygen = clamp(state.oxygen + 15, 0, 100);
+  if (!consumeTurn(1)) return;
+  renderAll();
+  announce('Медицинский модуль стабилизировал состояние. Второй дозы на этой палубе нет.');
+  setChoices([{ label: 'Продолжить', action: () => enterRoom(false) }]);
+}
+function recharge() {
+  const key = taskKey();
+  state.usedRechargeRooms.push(key);
+  state.scanner += 2;
+  state.battery += 1;
+  state.power = clamp(state.power + 20, 0, 100);
+  renderAll();
+  announce('Инструменты подзаряжены. Станция отключила разъём после использования.');
+  setChoices([{ label: 'Продолжить', action: () => enterRoom(false) }]);
+  saveCurrent();
+}
+function manualCrank() {
+  state.manualCrankUsed = true;
+  state.power = 18;
+  state.oxygen = clamp(state.oxygen - 5, 0, 100);
+  renderAll();
+  announce('Ты вручную прокрутил аварийный генератор. Энергии мало, но тупика нет.');
+  setChoices([{ label: 'Продолжить', action: () => enterRoom(false) }]);
+  saveCurrent();
+}
+
+function sonar() {
+  if (state.battery <= 0) return enterRoom(false, 'Батарея сонара разряжена. Переходы всё равно доступны, но их назначение неизвестно.');
+  state.battery -= 1;
+  state.sonarRevealedRoom = state.roomId;
+  const exits = Object.entries(room().exits || {});
+  exits.forEach(([dir, id], i) => playSonar((i + 1) * 3, dir === 'west' ? 'left' : dir === 'east' ? 'right' : 'center'));
+  const text = exits.length ? exits.map(([d,id]) => `${DIRECTION_NAMES[d]} — ${chapter().rooms[id].name}`).join('; ') : 'выходов нет';
+  if (!consumeTurn(0)) return;
+  renderAll();
+  announce(`Сонар построил локальную карту: ${text}.`);
+  showRoomActions();
+}
+
+function shortestPath(start, goal) {
+  if (start === goal) return [start];
+  const queue = [[start]];
+  const seen = new Set([start]);
+  while (queue.length) {
+    const path = queue.shift();
+    const last = path[path.length - 1];
+    for (const next of Object.values(chapter().rooms[last].exits || {})) {
+      if (seen.has(next)) continue;
+      const p = [...path, next];
+      if (next === goal) return p;
+      seen.add(next);
+      queue.push(p);
+    }
+  }
+  return [start];
+}
+function threatDistance() {
+  if (!state.threatRoom) return 99;
+  return shortestPath(state.threatRoom, state.roomId).length - 1;
+}
+function moveThreat() {
+  if (!state.threatRoom) return;
+  if (state.threatFrozen > 0) { state.threatFrozen -= 1; return; }
+  const path = shortestPath(state.threatRoom, state.roomId);
+  if (path.length > 1) state.threatRoom = path[1];
+}
+function listenThreat() {
+  const d = threatDistance();
+  playThreat(d);
+  const msg = d === 0 ? 'Оно уже здесь.' : d === 1 ? 'Шаги за соседней дверью.' : d === 2 ? 'Металл скрипит в двух переходах.' : 'Шаги далеко, но движутся в твою сторону.';
+  announce(msg, d <= 1);
+  showRoomActions();
+}
+function checkThreatEncounter() {
+  if (!state.threatRoom || state.threatRoom !== state.roomId) return false;
+  playThreat(0);
+  announce('Имитатор входит в помещение. Он произносит твою последнюю мысль раньше тебя.', true);
+  const actions = [];
+  if (state.battery > 0) actions.push({ label: `Заблокировать переборку (${state.battery})`, action: lockThreat });
+  if (state.stun > 0) actions.push({ label: `Дать оглушающий импульс (${state.stun})`, action: stunThreat });
+  actions.push({ label: 'Замереть и спрятаться', action: hideThreat });
+  const exits = Object.entries(room().exits || {});
+  exits.forEach(([dir,id]) => actions.push({ label: `Рвануть: ${DIRECTION_NAMES[dir]} — ${chapter().rooms[id].name}`, action: () => fleeThreat(id, dir) }));
+  setChoices(actions);
+  return true;
+}
+function pushThreatAway() {
+  const candidates = Object.keys(chapter().rooms).filter(id => id !== state.roomId && shortestPath(id, state.roomId).length >= 3);
+  state.threatRoom = candidates.length ? pick(candidates) : chapter().start;
+  state.threatFrozen = 2;
+}
+function lockThreat() {
+  if (state.battery <= 0) return checkThreatEncounter();
+  state.battery -= 1;
+  pushThreatAway();
+  state.score += 90;
+  announce('Переборка захлопнулась между вами. Имитатор ушёл в обход.');
+  setChoices([{ label: 'Продолжить', action: () => enterRoom(false) }]);
+  renderAll();
+}
+function stunThreat() {
+  if (state.stun <= 0) return checkThreatEncounter();
+  state.stun -= 1;
+  pushThreatAway();
+  state.score += 120;
+  announce('Импульс ломает его голос на десятки чужих голосов. У тебя есть время.');
+  setChoices([{ label: 'Продолжить', action: () => enterRoom(false) }]);
+  renderAll();
+}
+function hideThreat() {
+  const success = room().safe || Math.random() > 0.38;
+  if (success) {
+    pushThreatAway();
+    announce('Оно проходит рядом и повторяет звук твоего дыхания. Укрытие выдержало.');
+  } else {
+    damage(18, 'Имитатор нашёл укрытие.');
+    pushThreatAway();
+    announce('Оно нашло тебя, но аварийная вспышка заставила его отступить.', true);
+  }
+  if (checkFailure()) return;
+  setChoices([{ label: 'Продолжить', action: () => enterRoom(false) }]);
+  renderAll();
+}
+function fleeThreat(id, direction) {
+  damage(8, 'Когти скользнули по спине.');
+  state.roomId = id;
+  pushThreatAway();
+  if (checkFailure()) return;
+  enterRoom(true, `Ты вырываешься на ${DIRECTION_NAMES[direction]}.`);
+}
+
+function requirementsMet() {
+  return Object.entries(chapter().required).every(([k,v]) => (state.chapterProgress[k] || 0) >= v);
+}
+function tryExit() {
+  if (!requirementsMet()) {
+    announce(`Переход не открылся. Нельзя пропустить обязательные системы. Осталось: ${progressText()}.`, true);
+    showRoomActions();
+    return;
+  }
+  if (chapter().id === 'zero') return startFinale();
+  completeChapter();
+}
+function completeChapter() {
+  state.score += 500 + state.health * 2 + state.oxygen;
+  state.fragments += 1;
+  playUi('success');
+  const finishedTitle = chapter().title;
+  if (state.chapterIndex >= CHAPTERS.length - 1) return startFinale();
+  announce(`Глава «${finishedTitle}» завершена. Выбери одно улучшение перед следующей палубой.`);
+  chooseUpgrade();
+}
+function chooseUpgrade() {
+  const available = UPGRADES.filter(u => !state.upgrades.includes(u.id));
+  const options = [...available].sort(() => Math.random() - .5).slice(0, Math.min(3, available.length));
+  if (!options.length) return beginChapter(state.chapterIndex + 1);
+  setChoices(options.map(u => ({ label: `${u.name}. ${u.desc}`, action: () => selectUpgrade(u) })));
+}
+function selectUpgrade(upgrade) {
+  state.upgrades.push(upgrade.id);
+  upgrade.apply(state);
+  state.score += 100;
+  beginChapter(state.chapterIndex + 1);
+}
+
+function startFinale() {
+  const accuracy = state.totalSignals ? state.correctSignals / state.totalSignals : 0;
+  announce(`Ядро открыто. Собрано фрагментов памяти: ${state.fragments}. Точность решений по сигналам: ${Math.round(accuracy * 100)}%. Голос предлагает три протокола.`);
+  const choices = [
+    { label: 'Стереть ядро и все голоса', action: () => finishGame('purge') },
+    { label: 'Соединить свой нейроинтерфейс со станцией', action: () => finishGame('merge') }
+  ];
+  if (state.fragments >= 5) choices.push({ label: 'Собрать память и вывести уцелевших', action: () => finishGame('rescue') });
+  else choices.push({ label: 'Попытаться вывести уцелевших — недостаточно фрагментов', action: () => announceFinaleLocked() });
+  setChoices(choices);
+}
+function announceFinaleLocked() {
+  announce('Архив неполон. Без пяти фрагментов станция не отличит людей от имитаций. Выбери другой протокол.');
+  startFinale();
+}
+function finishGame(type) {
+  state.completed = true;
+  state.ending = type;
+  state.score += type === 'rescue' ? 1800 : type === 'purge' ? 900 : 650;
+  clearSave();
+  showScreen('ending');
+  const accuracy = state.totalSignals ? Math.round(state.correctSignals / state.totalSignals * 100) : 0;
+  const endings = {
+    rescue: ['Настоящая нулевая смена', 'Ты не поверил голосу вслепую и не уничтожил его из страха. Фрагменты складываются в карту криокапсул. «Орфей-9» выводит уцелевших, а последний чужой голос оказывается записью техника, который четыре раза перенаправлял опасность от твоего маршрута.'],
